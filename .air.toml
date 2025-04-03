@@ -1,0 +1,9 @@
+# Working directory and temporary directory for builds
+root = "."
+tmp_dir = "tmp"
+
+[build]
+# Command to build the binary from the source in ./cmd directory
+cmd = "go build -o tmp/main ./cmd"
+# Path to the binary to run
+bin = "tmp/main"
