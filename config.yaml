@@ -13,8 +13,7 @@ http:
     # Map key becomes the next part of the path: /static/<key>/...
     dirs:
       files-ubuntu: # Route: /static/files-ubuntu/
-        # path: "/var/www/static-files-ubuntu"
-        path: "/Users/mohamed/repos/admin-cli"
+        path: "/var/www/static-files-ubuntu"
       files-rhel:   # Route: /static/files-rhel/
         path: "/var/www/static-files-rhel"
       # Add other static directories as needed
@@ -28,9 +27,9 @@ http:
     # Caching configuration for specific domains (Applies primarily to HTTP requests)
     cache:
       enabled: true # Master switch for caching via this proxy
-      # cache-dir: "/var/cache/admin-bot/forward-proxy-cache" # Required if cache.enabled=true
-      cache-dir: "/Users/mohamed/repos/admin-bot/admin-bot-cache"
-      cache-ttl:  "30s" #"7d" # Default TTL for cached domains
+      cache-dir: "/var/cache/admin-bot/forward-proxy-cache" # Required if cache.enabled=true
+      # cache-dir: "/Users/mohamed/repos/admin-bot/admin-bot-cache"
+      cache-ttl:  "1d" #"7d" # Default TTL for cached domains
 
     # List of domain names (exact match, case-insensitive) to cache HTTP requests for.
     # Requests to other domains will be proxied but not cached.
@@ -46,7 +45,7 @@ proxy-cache-cleanup:
   # Enabled implicitly if http.proxy.enabled=true and http.proxy.cache-dir is set.
   enabled: true # Could be explicit if needed
   # How often to scan the cache directory for expired files.
-  interval: "40s" #"1h" # e.g., "1h", "30m", "6h"
+  interval: "1h" # e.g., "1h", "30m", "6h"
   # Operates on the directory defined in http.proxy.cache-dir,
   # using the TTL defined globally in http.proxy.cache-ttl.
   # Note: Handling per-target TTL overrides during cleanup adds complexity.
