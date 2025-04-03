@@ -1,0 +1,53 @@
+---
+# Main HTTP Server Configuration
+http:
+  enabled: true
+  addr: "0.0.0.0"
+  port: 8080 # Single port for all HTTP services
+
+  # --- Static File Serving ---
+  # Serves local directories via HTTP.
+  static:
+    enabled: true
+    # Base path prefix for all static routes: /static/
+    # Map key becomes the next part of the path: /static/<key>/...
+    dirs:
+      files-ubuntu: # Route: /static/files-ubuntu/
+        # path: "/var/www/static-files-ubuntu"
+        path: "/Users/mohamed/repos/admin-cli"
+      files-rhel:   # Route: /static/files-rhel/
+        path: "/var/www/static-files-rhel"
+      # Add other static directories as needed
+
+  # Forward Proxy Specific Settings
+  forward-proxy:
+    # Controls the forward proxy logic on the http listener
+    # allows Proxiying of domains if omited and domains is defined
+    enabled: true
+
+    # Caching configuration for specific domains (Applies primarily to HTTP requests)
+    cache:
+      enabled: true # Master switch for caching via this proxy
+      # cache-dir: "/var/cache/admin-bot/forward-proxy-cache" # Required if cache.enabled=true
+      cache-dir: "/Users/mohamed/repos/admin-bot/admin-bot-cache"
+      cache-ttl:  "30s" #"7d" # Default TTL for cached domains
+
+    # List of domain names (exact match, case-insensitive) to cache HTTP requests for.
+    # Requests to other domains will be proxied but not cached.
+    domains:
+      - "github.com"
+      - "pypi.org"
+      - "download.docker.com"
+      - "ch.archive.ubuntu.com"
+
+# --- Background Proxy Cache Cleanup Service ---
+# This section defines a background task to clean expired files from the proxy cache.
+proxy-cache-cleanup:
+  # Enabled implicitly if http.proxy.enabled=true and http.proxy.cache-dir is set.
+  enabled: true # Could be explicit if needed
+  # How often to scan the cache directory for expired files.
+  interval: "40s" #"1h" # e.g., "1h", "30m", "6h"
+  # Operates on the directory defined in http.proxy.cache-dir,
+  # using the TTL defined globally in http.proxy.cache-ttl.
+  # Note: Handling per-target TTL overrides during cleanup adds complexity.
+  #       A simpler approach is to clean based only on the global TTL or file mod time + global TTL.
