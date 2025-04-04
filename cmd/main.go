@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"flag" // Import flag
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -15,6 +17,15 @@ import (
 	"github.com/mohammedhabas11/admin-bot/pkg/httpserver"
 )
 
+// --- Command Line Flags ---
+var (
+	validatePath = flag.String("validate", "", "Path to config file to validate only.")
+	configPath   = flag.String("config", "", "Path to config file (overrides ENV var).") // Optional explicit path flag
+)
+
+// --- Environment Variable ---
+const ConfigPathEnvVar = "ADMINBOT_CONFIG_PATH" // Name of the ENV VAR
+
 // Global state for running services (protected by mutex)
 var (
 	appStateMutex      sync.Mutex
@@ -25,15 +36,47 @@ var (
 )
 
 func main() {
+	flag.Parse() // Parse command line flags first
+
+	// --- Handle Validation Command ---
+	if *validatePath != "" {
+		fmt.Printf("Validating configuration file: %s\n", *validatePath)
+		// Use the dedicated validation function from the config package
+		err := config.ValidateConfigFile(*validatePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Validation Failed: %v\n", err)
+			os.Exit(1) // Exit with error code
+		}
+		fmt.Println("Configuration file is valid.")
+		os.Exit(0) // Exit successfully
+	}
+
+	// --- Determine Config Path for Running Service ---
+	finalConfigPath := "config.yaml" // Default path
+	if *configPath != "" {
+		finalConfigPath = *configPath // Use -config flag if provided
+		log.Printf("Using config path from -config flag: %s", finalConfigPath)
+	} else {
+		envPath := os.Getenv(ConfigPathEnvVar)
+		if envPath != "" {
+			finalConfigPath = envPath // Use ENV var if provided and -config wasn't
+			log.Printf("Using config path from %s environment variable: %s", ConfigPathEnvVar, finalConfigPath)
+		} else {
+			log.Printf("Using default config path: %s", finalConfigPath)
+		}
+	}
+
+	// --- Initial Setup ---
 	log.Println("Starting admin-bot...")
 
 	// Channel for signaling config reloads
-	reloadChan := make(chan bool, 1) // Buffered channel
+	reloadChan := make(chan bool, 1)
 
 	// Load initial configuration and start watching
-	initialCfg, err := config.LoadConfig("config.yaml", reloadChan) // Pass the channel
+	// LoadConfig now FATALS on unrecoverable initial load errors (except file not found with defaults)
+	initialCfg, err := config.LoadConfig(finalConfigPath, reloadChan)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to load initial configuration: %v", err)
+		log.Fatalf("FATAL: Failed to load initial configuration from %s: %v", finalConfigPath, err)
 	}
 	activeConfig = initialCfg // Set the initial active config
 
@@ -98,34 +141,34 @@ func compareConfigs(oldCfg, newCfg *config.Config) (restartServer bool, restartC
 	}
 
 	// 1. Check for HTTP Server restart conditions
-	// Restart if HTTP enabled status, address, or port changes.
-	// Also restart if static or proxy sections change (simplest way to reload handlers).
-	if oldCfg.HTTP.Enabled != newCfg.HTTP.Enabled ||
-		oldCfg.HTTP.Addr != newCfg.HTTP.Addr ||
-		oldCfg.HTTP.Port != newCfg.HTTP.Port ||
-		!reflect.DeepEqual(oldCfg.HTTP.Static, newCfg.HTTP.Static) || // Check static config
-		!reflect.DeepEqual(oldCfg.HTTP.ForwardProxy, newCfg.HTTP.ForwardProxy) { // Check proxy config
+	// Use DeepEqual for simplicity and robustness across all HTTP settings
+	if !reflect.DeepEqual(oldCfg.HTTP, newCfg.HTTP) {
 		log.Println("Change detected in HTTP configuration requiring server restart.")
 		restartServer = true
 	}
 
 	// 2. Check for Cache Cleaner restart conditions
-	// Restart if cleaner interval changes OR if relevant proxy cache settings change
-	// (enabled status, dir, ttl - as these affect cleaner operation)
+	// Cleaner depends on interval and the proxy cache settings
 	oldProxyCacheEnabled := oldCfg.HTTP.ForwardProxy.Enabled && oldCfg.HTTP.ForwardProxy.Cache.Enabled && oldCfg.HTTP.ForwardProxy.Cache.CacheDir != ""
 	newProxyCacheEnabled := newCfg.HTTP.ForwardProxy.Enabled && newCfg.HTTP.ForwardProxy.Cache.Enabled && newCfg.HTTP.ForwardProxy.Cache.CacheDir != ""
 
-	if oldProxyCacheEnabled != newProxyCacheEnabled || // If caching master status changed
-		(newProxyCacheEnabled && // Only compare details if caching is enabled in new config
-			(oldCfg.ProxyCacheCleanup.Interval != newCfg.ProxyCacheCleanup.Interval ||
-				oldCfg.HTTP.ForwardProxy.Cache.CacheDir != newCfg.HTTP.ForwardProxy.Cache.CacheDir ||
-				oldCfg.HTTP.ForwardProxy.Cache.CacheTTL != newCfg.HTTP.ForwardProxy.Cache.CacheTTL)) {
-		log.Println("Change detected in Cache Cleaner or relevant Proxy Cache configuration requiring cleaner restart.")
-		restartCleaner = true
+	// Compare relevant fields only if the cleaner *should* be running in the new config
+	if newProxyCacheEnabled {
+		// Restart if cleaner wasn't running before OR if its settings changed
+		if !oldProxyCacheEnabled ||
+			oldCfg.ProxyCacheCleanup.Interval != newCfg.ProxyCacheCleanup.Interval ||
+			oldCfg.HTTP.ForwardProxy.Cache.CacheDir != newCfg.HTTP.ForwardProxy.Cache.CacheDir ||
+			oldCfg.HTTP.ForwardProxy.Cache.CacheTTL != newCfg.HTTP.ForwardProxy.Cache.CacheTTL {
+			log.Println("Change detected in Cache Cleaner or relevant Proxy Cache configuration requiring cleaner restart.")
+			restartCleaner = true
+		}
+	} else {
+		// If cleaner should NOT be running in new config, check if it WAS running before
+		if oldProxyCacheEnabled {
+			log.Println("Cache Cleaner disabled in new configuration, requires stopping.")
+			restartCleaner = true // Signal stop needed
+		}
 	}
-
-	// If server restarts, cleaner might also need restarting if its config depends on server state
-	// For now, we treat them independently based on their direct config sections.
 
 	return restartServer, restartCleaner
 }
