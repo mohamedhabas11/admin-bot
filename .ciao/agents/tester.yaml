@@ -1,0 +1,7 @@
+name: tester
+inputs:
+  - testing
+outputs:
+  - review
+skills:
+  - test

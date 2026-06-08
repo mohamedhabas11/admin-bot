@@ -1,0 +1,46 @@
+name: feature-development
+nodes:
+  - name: request
+    kind: channel
+    channel: request
+  - name: specification
+    kind: channel
+    channel: specification
+    wait: true
+  - name: task-decomposition
+    kind: channel
+    channel: task-decomposition
+    wait: true
+  - name: approval
+    kind: approval
+    channel: approval
+  - name: implementation
+    kind: channel
+    channel: implementation
+    wait: true
+  - name: testing
+    kind: channel
+    channel: testing
+    wait: true
+  - name: review
+    kind: channel
+    channel: review
+    wait: true
+  - name: complete
+    kind: channel
+    channel: complete
+edges:
+  - from: request
+    to: specification
+  - from: specification
+    to: task-decomposition
+  - from: task-decomposition
+    to: approval
+  - from: approval
+    to: implementation
+  - from: implementation
+    to: testing
+  - from: testing
+    to: review
+  - from: review
+    to: complete

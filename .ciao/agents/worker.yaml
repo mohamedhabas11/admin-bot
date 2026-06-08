@@ -1,0 +1,8 @@
+name: worker
+inputs:
+  - implementation
+outputs:
+  - testing
+skills:
+  - build
+  - format

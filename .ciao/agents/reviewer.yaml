@@ -1,0 +1,8 @@
+name: reviewer
+inputs:
+  - review
+outputs:
+  - complete
+skills:
+  - lint
+  - audit

@@ -1,0 +1,8 @@
+name: planner
+inputs:
+  - request
+outputs:
+  - specification
+skills:
+  - spec
+  - format

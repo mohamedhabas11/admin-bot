@@ -3,8 +3,8 @@ module github.com/mohammedhabas11/admin-bot
 go 1.23.0
 
 require (
-	github.com/spf13/viper v1.20.1
 	github.com/fsnotify/fsnotify v1.8.0
+	github.com/spf13/viper v1.20.1
 )
 
 require (

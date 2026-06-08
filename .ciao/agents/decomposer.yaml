@@ -1,0 +1,8 @@
+name: decomposer
+inputs:
+  - specification
+outputs:
+  - task-decomposition
+skills:
+  - plan
+  - format

@@ -1,0 +1,7 @@
+name: validator
+inputs:
+  - task-decomposition
+outputs:
+  - approval
+skills:
+  - audit
