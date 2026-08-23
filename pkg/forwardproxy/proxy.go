@@ -107,7 +107,9 @@ func (h *ProxyHandler) HandleConnect(w http.ResponseWriter, r *http.Request) {
 // HandleHTTP handles standard HTTP GET, POST, etc. requests passed from the top-level handler.
 func (h *ProxyHandler) HandleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check for self-request loops (a client asking this proxy to proxy itself).
-	if h.isSelfRequest(r.Host) && !r.URL.IsAbs() {
+	// Applies to absolute-form URLs too: explicit-proxy clients send those, and
+	// proxying a request that targets ourselves would recurse.
+	if h.isSelfRequest(r.Host) {
 		slog.Warn("possible self-request loop; returning 404", "method", r.Method, "uri", r.RequestURI)
 		http.NotFound(w, r) // Return 404 instead of proxying
 		return

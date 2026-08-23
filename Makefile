@@ -2,6 +2,8 @@
 PROJECT_NAME := admin-bot
 PROJECT_PORT := 8080
 GO := go
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X main.buildVersion=$(VERSION)
 
 .PHONY: all test vet fmt lint build clean docker-dev
 
@@ -30,8 +32,8 @@ lint:
 
 # Build the project
 build:
-	@echo "Building $(PROJECT_NAME)..."
-	@$(GO) build -o bin/$(PROJECT_NAME) ./cmd
+	@echo "Building $(PROJECT_NAME) $(VERSION)..."
+	@$(GO) build -ldflags "$(LDFLAGS)" -o bin/$(PROJECT_NAME) ./cmd
 
 # Clean build artifacts
 clean:

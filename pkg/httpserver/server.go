@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -16,13 +17,19 @@ import (
 
 type Server struct {
 	initialConfig *config.Config
+	version       string
 	server        *http.Server
 }
 
 // NewServer creates a new Server instance but doesn't start it yet.
-func NewServer(cfg *config.Config) *Server {
+// version is reported by the /healthz endpoint ("" renders as "dev").
+func NewServer(cfg *config.Config, version string) *Server {
+	if version == "" {
+		version = "dev"
+	}
 	return &Server{
 		initialConfig: cfg,
+		version:       version,
 	}
 }
 
@@ -34,6 +41,10 @@ func (s *Server) createRootHandler(cfg *config.Config) http.Handler {
 	// --- Create Handlers ---
 	requestMux := http.NewServeMux() // Mux for non-CONNECT requests
 	var specificProxyHandler *forwardproxy.ProxyHandler
+
+	// Liveness/readiness endpoint; registered before the "/" fallbacks so the
+	// proxy can never capture it.
+	requestMux.HandleFunc("/healthz", s.handleHealthz)
 
 	// Register Static File Routes if enabled
 	if cfg.HTTP.Static.Enabled {
@@ -79,6 +90,17 @@ func (s *Server) createRootHandler(cfg *config.Config) http.Handler {
 		// 2. For all other methods, delegate to the requestMux
 		requestMux.ServeHTTP(w, r)
 	})
+}
+
+// handleHealthz serves the liveness endpoint with build metadata.
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{
+		"status":  "ok",
+		"version": s.version,
+	}); err != nil {
+		slog.Error("failed to write healthz response", "err", err)
+	}
 }
 
 // Start runs the HTTP server. It takes a context for graceful shutdown.
