@@ -6,12 +6,38 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url" // Import url
 	"time"
 )
+
+// proxyHTTPClient is shared by all outgoing proxied requests so connections
+// are pooled and reused across requests instead of being re-established each time.
+var proxyHTTPClient = newProxyHTTPClient()
+
+// newProxyHTTPClient builds the client used for origin fetches.
+// Proxy use is explicitly disabled so proxied traffic cannot loop back
+// through this process or an ambient environment proxy.
+func newProxyHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 30 * time.Second, // Overall request timeout
+		Transport: &http.Transport{
+			Proxy: nil, // Explicitly disable proxy use for this client
+			// Copy settings from http.DefaultTransport for robustness
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second, // Connection timeout
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}
+}
 
 // PerformFetch executes the outgoing HTTP request.
 func PerformFetch(origReq *http.Request) (resp *http.Response, bodyBytes []byte, err error) {
@@ -28,36 +54,9 @@ func PerformFetch(origReq *http.Request) (resp *http.Response, bodyBytes []byte,
 	// Remove proxy-specific headers from outgoing request
 	outReq.Header.Del("Proxy-Connection")
 	outReq.Header.Del("Proxy-Authorization")
-	// Add/Modify headers if needed (e.g., Via header)
-	// outReq.Header.Add("Via", "admin-bot-proxy")
-
-	// --- Configure Client to bypass proxy ---
-	// Use a shared client? For now, create per request. Consider pooling later.
-	client := &http.Client{
-		Timeout: 30 * time.Second, // Overall request timeout
-		Transport: &http.Transport{
-			Proxy: nil, // Explicitly disable proxy use for this client
-			// Copy settings from http.DefaultTransport for robustness
-			DialContext: (&net.Dialer{
-				Timeout:   30 * time.Second, // Connection timeout
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		},
-		// Prevent auto-following redirects if you want the proxy to handle them
-		// CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		//  return http.ErrUseLastResponse
-		// },
-	}
-	// --- End Client Configuration ---
-
-	// Execute the request
-	log.Printf("Fetching: %s %s", outReq.Method, outReq.URL)
-	resp, err = client.Do(outReq)
+	// Execute the request on the shared client
+	slog.Debug("origin fetch", "method", outReq.Method, "url", outReq.URL)
+	resp, err = proxyHTTPClient.Do(outReq)
 	if err != nil {
 		// Check specifically for context deadline exceeded which indicates timeout
 		// Use errors.Is for robust error checking
@@ -73,7 +72,7 @@ func PerformFetch(origReq *http.Request) (resp *http.Response, bodyBytes []byte,
 	// Read the body bytes for caching purposes
 	bodyBytes, err = io.ReadAll(resp.Body)
 	if err != nil {
-		log.Printf("WARN: Failed to read response body from %s: %v", outReq.URL.Host, err)
+		slog.Warn("failed to read response body", "host", outReq.URL.Host, "err", err)
 		resp.Body.Close() // Close immediately if read failed
 		// Return error because we can't cache or serve incomplete body
 		return resp, nil, fmt.Errorf("failed to read response body: %w", err)
@@ -84,7 +83,3 @@ func PerformFetch(origReq *http.Request) (resp *http.Response, bodyBytes []byte,
 
 	return resp, bodyBytes, nil
 }
-
-// copyHeaders function needs to be accessible here if not moved to a utils package
-// Ensure copyHeaders is defined either here or imported if moved.
-// func copyHeaders(dst, src http.Header) { ... } // Definition is in proxy.go

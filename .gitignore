@@ -26,3 +26,7 @@ go.work.sum
 
 # CIAO orchestration infrastructure (never commit)
 .ciao/
+
+# Ward agent-memory store and generated run artifacts
+.ward/
+workflows/

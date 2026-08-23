@@ -3,12 +3,11 @@ package config
 import (
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 
 	"github.com/fsnotify/fsnotify"
-	// "github.com/robfig/cron/v3" // Only needed if validating cron strings
 	"github.com/spf13/viper"
 )
 
@@ -49,16 +48,12 @@ func loadAndValidate(path string) (*Config, error) {
 		return nil, fmt.Errorf("unable to decode config from %s into struct: %w", path, err)
 	}
 
-	// Apply defaults that might depend on structure (like default index path)
-	applyDefaults(&cfg)
-
 	// Validate the loaded configuration
-	if !validateConfig(&cfg) {
-		// Return a generic validation error
-		return &cfg, errors.New("configuration validation failed (see warnings/errors above)")
+	if err := validateConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	log.Printf("Configuration successfully loaded and validated from %s.", path)
+	slog.Info("configuration loaded and validated", "path", path)
 	return &cfg, nil
 }
 
@@ -100,20 +95,19 @@ func LoadConfig(path string, reloadChan chan<- bool) (*Config, error) {
 		}
 
 		if isFileNotFoundError {
-			log.Printf("INFO: Config file not found at %s. Attempting to run with defaults.", path)
+			slog.Info("config file not found; running with defaults", "path", path)
 			// Create config purely from defaults set on viperInstance
 			var defaultCfg Config
 			if defaultUnmarshalErr := viperInstance.Unmarshal(&defaultCfg); defaultUnmarshalErr != nil {
 				// This should be rare if defaults are simple
 				return nil, fmt.Errorf("failed to unmarshal default configuration: %w", defaultUnmarshalErr)
 			}
-			applyDefaults(&defaultCfg) // Apply structural defaults
-			if !validateConfig(&defaultCfg) {
+			if err := validateConfig(&defaultCfg); err != nil {
 				// If even defaults are invalid, treat as fatal
-				return nil, errors.New("default configuration is invalid, cannot start")
+				return nil, fmt.Errorf("default configuration is invalid, cannot start: %w", err)
 			}
 			initialCfg = &defaultCfg // Use the validated default config
-			log.Println("Successfully initialized with default configuration.")
+			slog.Info("initialized with default configuration")
 			// Clear the error since we are proceeding with defaults
 			err = nil
 		} else {
@@ -138,26 +132,24 @@ func LoadConfig(path string, reloadChan chan<- bool) (*Config, error) {
 	// but might be created later. Viper needs to know *what* to watch.
 	viperInstance.WatchConfig()
 	viperInstance.OnConfigChange(func(e fsnotify.Event) {
-		log.Printf("Config file changed: %s. Reloading...", e.Name)
+		slog.Info("config file changed; reloading", "path", e.Name)
 
 		// Re-read using the persistent viper instance
 		if err := viperInstance.ReadInConfig(); err != nil {
 			// Log error, but don't necessarily stop watching or kill app
 			// Maybe the file is temporarily unreadable?
-			log.Printf("ERROR: Error re-reading config file on change: %v", err)
+			slog.Error("error re-reading config file on change", "err", err)
 			return // Keep old config if re-read fails
 		}
 
 		var tempCfg Config
 		if err := viperInstance.Unmarshal(&tempCfg); err != nil {
-			log.Printf("ERROR: Failed to reload config into struct: %v", err)
+			slog.Error("failed to decode reloaded config", "err", err)
 			return // Keep old config if unmarshal fails
 		}
 
-		applyDefaults(&tempCfg) // Apply structural defaults
-
-		if !validateConfig(&tempCfg) {
-			log.Printf("ERROR: Reloaded configuration is invalid. Keeping previous configuration.")
+		if err := validateConfig(&tempCfg); err != nil {
+			slog.Error("reloaded config invalid; keeping previous", "err", err)
 			return
 		}
 
@@ -165,20 +157,20 @@ func LoadConfig(path string, reloadChan chan<- bool) (*Config, error) {
 		configMutex.Lock()
 		currentConfig = &tempCfg
 		configMutex.Unlock()
-		log.Println("Configuration reloaded successfully.")
+		slog.Info("configuration reloaded")
 
 		// Send signal to main goroutine
 		if reloadChan != nil {
 			select {
 			case reloadChan <- true:
-				log.Println("Sent reload signal to main.")
+				slog.Debug("sent reload signal to main")
 			default:
-				log.Println("WARN: Failed to send reload signal to main (channel full or nil).")
+				slog.Warn("failed to send reload signal (channel full or nil)")
 			}
 		}
 	})
 
-	log.Printf("Configuration monitoring active for %s (or defaults).", viperInstance.ConfigFileUsed())
+	slog.Info("configuration monitoring active", "path", viperInstance.ConfigFileUsed())
 	return currentConfig, nil // Return the initial config (loaded or default)
 }
 
@@ -194,69 +186,37 @@ func setDefaults(v *viper.Viper) {
 	v.SetDefault("proxy-cache-cleanup.interval", "1h")
 }
 
-// applyDefaults sets default values for nested config fields if they are empty.
-// This is needed for defaults that depend on other values.
-func applyDefaults(cfg *Config) {
-	// Add any necessary structural defaults here if needed in the future
-	// Example:
-	// if cfg.SomeSection.SomeField == "" && cfg.SomeSection.OtherField != "" {
-	//     cfg.SomeSection.SomeField = calculateDefault(cfg.SomeSection.OtherField)
-	// }
-}
-
 // GetConfig provides thread-safe access to the current configuration.
 func GetConfig() *Config {
 	configMutex.RLock()
 	defer configMutex.RUnlock()
 	if currentConfig == nil {
-		log.Println("WARNING: GetConfig called before LoadConfig completed or after failure.")
+		slog.Warn("GetConfig called before LoadConfig completed")
 		return &Config{}
 	}
 	return currentConfig
 }
 
 // validateConfig checks the validity of the loaded configuration.
-// Returns true if valid, false otherwise. Logs warnings/errors.
-func validateConfig(cfg *Config) bool {
-	isValid := true
-	errorPrefix := "Config validation error:" // Prefix for fatal validation errors
+// All problems are collected and returned as a single joined error so callers
+// see every issue at once instead of only the first one.
+func validateConfig(cfg *Config) error {
+	var errs []error
 
-	// Validate Proxy Cache Settings
+	// Proxy cache settings are only relevant when both switches are on.
 	if cfg.HTTP.ForwardProxy.Enabled && cfg.HTTP.ForwardProxy.Cache.Enabled {
 		if cfg.HTTP.ForwardProxy.Cache.CacheDir == "" {
-			log.Printf("%s http.forward-proxy.cache.enabled is true, but cache-dir is not set.", errorPrefix)
-			isValid = false // Make this an error
+			errs = append(errs, errors.New("http.forward-proxy.cache.cache-dir is required when caching is enabled"))
 		}
 		if _, err := cfg.HTTP.ForwardProxy.Cache.GetCacheTTL(); err != nil {
-			log.Printf("%s Invalid format for http.forward-proxy.cache.cache-ttl ('%s'): %v.", errorPrefix, cfg.HTTP.ForwardProxy.Cache.CacheTTL, err)
-			isValid = false // Make this an error
+			errs = append(errs, fmt.Errorf("invalid http.forward-proxy.cache.cache-ttl %q: %w", cfg.HTTP.ForwardProxy.Cache.CacheTTL, err))
 		}
-	}
-	// Validate Cleanup Interval (only relevant if proxy caching is enabled)
-	if cfg.HTTP.ForwardProxy.Enabled && cfg.HTTP.ForwardProxy.Cache.Enabled && cfg.HTTP.ForwardProxy.Cache.CacheDir != "" {
+
+		// The cleanup worker only runs alongside an active proxy cache.
 		if _, err := cfg.ProxyCacheCleanup.GetInterval(); err != nil {
-			log.Printf("%s Invalid format for proxy-cache-cleanup.interval ('%s'): %v.", errorPrefix, cfg.ProxyCacheCleanup.Interval, err)
-			isValid = false // Make this an error
+			errs = append(errs, fmt.Errorf("invalid proxy-cache-cleanup.interval %q: %w", cfg.ProxyCacheCleanup.Interval, err))
 		}
 	}
 
-	// Validate Static Dirs Exist? Optional, might be annoying if dirs are created later.
-	// if cfg.HTTP.Static.Enabled {
-	// 	for key, dirCfg := range cfg.HTTP.Static.Dirs {
-	// 		if dirCfg.Path == "" {
-	// 			log.Printf("%s http.static.dirs.%s: path cannot be empty.", errorPrefix, key)
-	// 			isValid = false
-	// 			continue
-	// 		}
-	// 		if _, err := os.Stat(dirCfg.Path); os.IsNotExist(err) {
-	// 			log.Printf("WARNING: Static directory path for '%s' does not exist: %s", key, dirCfg.Path)
-	// 			// isValid = false // Decide if this is a warning or error
-	// 		} else if err != nil {
-	// 			log.Printf("%s Cannot access static directory path for '%s' (%s): %v", errorPrefix, key, dirCfg.Path, err)
-	// 			isValid = false
-	// 		}
-	// 	}
-	// }
-
-	return isValid
+	return errors.Join(errs...)
 }

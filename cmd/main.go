@@ -4,7 +4,7 @@ import (
 	"context"
 	"flag" // Import flag
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"reflect"
@@ -55,19 +55,19 @@ func main() {
 	finalConfigPath := "config.yaml" // Default path
 	if *configPath != "" {
 		finalConfigPath = *configPath // Use -config flag if provided
-		log.Printf("Using config path from -config flag: %s", finalConfigPath)
+		slog.Info("using config path from -config flag", "path", finalConfigPath)
 	} else {
 		envPath := os.Getenv(ConfigPathEnvVar)
 		if envPath != "" {
 			finalConfigPath = envPath // Use ENV var if provided and -config wasn't
-			log.Printf("Using config path from %s environment variable: %s", ConfigPathEnvVar, finalConfigPath)
+			slog.Info("using config path from environment", "env", ConfigPathEnvVar, "path", finalConfigPath)
 		} else {
-			log.Printf("Using default config path: %s", finalConfigPath)
+			slog.Info("using default config path", "path", finalConfigPath)
 		}
 	}
 
 	// --- Initial Setup ---
-	log.Println("Starting admin-bot...")
+	slog.Info("starting admin-bot")
 
 	// Channel for signaling config reloads
 	reloadChan := make(chan bool, 1)
@@ -76,7 +76,8 @@ func main() {
 	// LoadConfig now FATALS on unrecoverable initial load errors (except file not found with defaults)
 	initialCfg, err := config.LoadConfig(finalConfigPath, reloadChan)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to load initial configuration from %s: %v", finalConfigPath, err)
+		slog.Error("failed to load initial configuration", "path", finalConfigPath, "err", err)
+		os.Exit(1)
 	}
 	activeConfig = initialCfg // Set the initial active config
 
@@ -86,26 +87,26 @@ func main() {
 	// --- Graceful Shutdown / Reload Handling ---
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-	log.Println("Application started. Press Ctrl+C to shut down.")
+	slog.Info("application started; press Ctrl+C to shut down")
 
 	// Main loop to wait for signals or reload triggers
 	keepRunning := true
 	for keepRunning {
 		select {
 		case sig := <-signalChan:
-			log.Printf("Shutdown signal received: %v. Starting graceful shutdown...", sig)
+			slog.Info("shutdown signal received; starting graceful shutdown", "signal", sig)
 			keepRunning = false      // Exit loop after handling shutdown
 			stopServices(true, true) // Stop all services on shutdown
 
 		case <-reloadChan:
-			log.Println("Reload signal received. Checking for necessary restarts...")
+			slog.Info("reload signal received; checking for necessary restarts")
 			newCfg := config.GetConfig() // Get the newly loaded config
 
 			// --- Compare configurations ---
 			restartServer, restartCleaner := compareConfigs(activeConfig, newCfg)
 
 			if !restartServer && !restartCleaner {
-				log.Println("No configuration changes requiring service restart detected.")
+				slog.Info("no config changes requiring service restart")
 				// Update activeConfig even if no restart, so next comparison is correct
 				appStateMutex.Lock()
 				activeConfig = newCfg
@@ -113,7 +114,7 @@ func main() {
 				continue // Go back to waiting for signals
 			}
 
-			log.Println("Configuration changes detected, restarting relevant services...")
+			slog.Info("config changes detected; restarting relevant services")
 			stopServices(restartServer, restartCleaner) // Stop only affected services
 
 			// Update active config *before* starting with it
@@ -122,28 +123,28 @@ func main() {
 			appStateMutex.Unlock()
 
 			startServices(activeConfig) // Start services (will only start those stopped)
-			log.Println("Relevant services restarted with new configuration.")
+			slog.Info("relevant services restarted with new configuration")
 		}
 	}
 
 	// --- Wait for Services to Finish on Shutdown ---
-	log.Println("Waiting for background tasks (HTTP server) to complete...")
+	slog.Info("waiting for background tasks to complete")
 	serverWg.Wait() // Wait for HTTP server goroutine to finish its shutdown
 
-	log.Println("Application exiting.")
+	slog.Info("application exiting")
 }
 
 // compareConfigs checks if restarts are needed based on config differences.
 func compareConfigs(oldCfg, newCfg *config.Config) (restartServer bool, restartCleaner bool) {
 	if oldCfg == nil || newCfg == nil {
-		log.Println("WARN: Comparing nil configurations, forcing restart.")
+		slog.Warn("comparing nil configurations; forcing restart")
 		return true, true // Force restart if something went wrong
 	}
 
 	// 1. Check for HTTP Server restart conditions
 	// Use DeepEqual for simplicity and robustness across all HTTP settings
 	if !reflect.DeepEqual(oldCfg.HTTP, newCfg.HTTP) {
-		log.Println("Change detected in HTTP configuration requiring server restart.")
+		slog.Info("http configuration change requires server restart")
 		restartServer = true
 	}
 
@@ -159,13 +160,13 @@ func compareConfigs(oldCfg, newCfg *config.Config) (restartServer bool, restartC
 			oldCfg.ProxyCacheCleanup.Interval != newCfg.ProxyCacheCleanup.Interval ||
 			oldCfg.HTTP.ForwardProxy.Cache.CacheDir != newCfg.HTTP.ForwardProxy.Cache.CacheDir ||
 			oldCfg.HTTP.ForwardProxy.Cache.CacheTTL != newCfg.HTTP.ForwardProxy.Cache.CacheTTL {
-			log.Println("Change detected in Cache Cleaner or relevant Proxy Cache configuration requiring cleaner restart.")
+			slog.Info("cache cleaner configuration change requires cleaner restart")
 			restartCleaner = true
 		}
 	} else {
 		// If cleaner should NOT be running in new config, check if it WAS running before
 		if oldProxyCacheEnabled {
-			log.Println("Cache Cleaner disabled in new configuration, requires stopping.")
+			slog.Info("cache cleaner disabled in new configuration; stopping")
 			restartCleaner = true // Signal stop needed
 		}
 	}
@@ -178,7 +179,7 @@ func startServices(cfg *config.Config) {
 	appStateMutex.Lock()
 	defer appStateMutex.Unlock()
 
-	log.Println("Attempting to start necessary services...")
+	slog.Debug("starting necessary services")
 
 	// --- Start HTTP Server ---
 	if cfg.HTTP.Enabled {
@@ -187,23 +188,23 @@ func startServices(cfg *config.Config) {
 			serverWg.Add(1)
 			go func(server *httpserver.Server) {
 				defer serverWg.Done()
-				log.Println("Starting HTTP server goroutine...")
+				slog.Debug("starting http server goroutine")
 				// Use a background context - shutdown is handled by stopServices
 				if err := server.Start(context.Background()); err != nil {
-					log.Printf("HTTP server error: %v", err)
+					slog.Error("http server error", "err", err)
 				}
-				log.Println("HTTP server goroutine finished.")
+				slog.Debug("http server goroutine finished")
 			}(currentHttpServer)
 		} else {
-			log.Println("HTTP server already running.")
+			slog.Debug("http server already running")
 		}
 	} else {
-		log.Println("HTTP server is disabled by configuration.")
+		slog.Info("http server disabled by configuration")
 		// Ensure server is stopped if it was running and is now disabled
 		if currentHttpServer != nil {
-			log.Println("Stopping HTTP server as it's now disabled...")
+			slog.Info("stopping http server as it is now disabled")
 			if err := currentHttpServer.Stop(); err != nil {
-				log.Printf("Error stopping disabled HTTP server: %v", err)
+				slog.Error("error stopping disabled http server", "err", err)
 			}
 			currentHttpServer = nil
 		}
@@ -215,29 +216,29 @@ func startServices(cfg *config.Config) {
 		if currentCleanerStop == nil { // Only start if not already running
 			cleanerInterval, err := cfg.ProxyCacheCleanup.GetInterval()
 			if err != nil {
-				log.Printf("WARNING: Invalid cache cleanup interval, using default: %v", err)
+				slog.Warn("invalid cache cleanup interval; using default", "err", err)
 				cleanerInterval = time.Hour
 			}
 			cacheDir := cfg.HTTP.ForwardProxy.Cache.CacheDir
 			cacheTTL, err := cfg.HTTP.ForwardProxy.Cache.GetCacheTTL()
 			if err != nil {
-				log.Printf("WARNING: Invalid cache TTL, using default for cleanup: %v", err)
+				slog.Warn("invalid cache TTL; using default for cleanup", "err", err)
 				cacheTTL, _ = config.StrToDuration("7d")
 			}
 			currentCleanerStop = cachecleaner.StartCleaner(context.Background(), cleanerInterval, cacheDir, cacheTTL)
 		} else {
-			log.Println("Cache cleaner already running.")
+			slog.Debug("cache cleaner already running")
 		}
 	} else {
-		log.Println("Proxy cache cleaning is disabled by configuration.")
+		slog.Info("proxy cache cleaning disabled by configuration")
 		// Ensure cleaner is stopped if it was running and is now disabled
 		if currentCleanerStop != nil {
-			log.Println("Stopping cache cleaner as it's now disabled...")
+			slog.Info("stopping cache cleaner as it is now disabled")
 			currentCleanerStop()
 			currentCleanerStop = nil
 		}
 	}
-	log.Println("startServices completed.")
+	slog.Debug("startServices completed")
 }
 
 // stopServices gracefully stops running services selectively.
@@ -245,29 +246,29 @@ func stopServices(stopServer bool, stopCleaner bool) {
 	appStateMutex.Lock()
 	defer appStateMutex.Unlock()
 
-	log.Println("Attempting to stop services...")
+	slog.Debug("stopping services")
 
 	// Stop HTTP Server
 	if stopServer && currentHttpServer != nil {
-		log.Println("Stopping HTTP server...")
+		slog.Info("stopping http server")
 		if err := currentHttpServer.Stop(); err != nil {
-			log.Printf("Error stopping HTTP server: %v", err)
+			slog.Error("error stopping http server", "err", err)
 		} else {
-			log.Println("HTTP server stop initiated.")
+			slog.Info("http server stop initiated")
 		}
 		currentHttpServer = nil // Clear variable after initiating stop
 	} else if stopServer {
-		log.Println("HTTP server stop requested but was not running.")
+		slog.Debug("http server stop requested but was not running")
 	}
 
 	// Stop Cache Cleaner
 	if stopCleaner && currentCleanerStop != nil {
-		log.Println("Stopping cache cleaner...")
+		slog.Info("stopping cache cleaner")
 		currentCleanerStop()
-		log.Println("Cache cleaner stopped.")
+		slog.Info("cache cleaner stopped")
 		currentCleanerStop = nil // Clear variable
 	} else if stopCleaner {
-		log.Println("Cache cleaner stop requested but was not running.")
+		slog.Debug("cache cleaner stop requested but was not running")
 	}
-	log.Println("stopServices completed.")
+	slog.Debug("stopServices completed")
 }

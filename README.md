@@ -1,87 +1,95 @@
 # admin-bot
-admin-bot is a service that aims to make host managment easier in confined networks.
 
-### WebServer
-admin-bot handles static content delivery by acting as a webserver that simply returns files or defined repositories in its `config.yaml` file.
+admin-bot is a single-binary Go service that makes host management easier in confined
+networks. It serves static content over HTTP and acts as a caching forward proxy,
+so machines without direct internet access can reach packages and files through it.
 
-```yaml
-http:
-  enabled: true
-  addr: "0.0.0.0"
-  port: 8080
-  dirs:  # Route: /static/<key-name>
-    static-files-ubuntu:
-      path: "/var/www/static-files-ubuntu"
-    static-files-rhel:
-      path: "/var/www/static-files-rhel"
+## Features
+
+- **Static file serving** — expose local directories under `/static/<name>/`.
+- **Forward proxy** — proxies plain HTTP requests and `CONNECT` tunnels.
+- **Response caching** — caches responses for allow-listed domains with TTL-based expiry.
+- **Hot config reload** — edits to `config.yaml` apply without restarting the process;
+  only the services whose settings changed are restarted.
+- **Background cache cleanup** — a worker periodically deletes expired cache entries.
+
+## Quick start
+
+```sh
+make build          # produces bin/admin-bot
+./bin/admin-bot     # runs with ./config.yaml by default
 ```
 
-### Proxy
-admin-bot handles proxy lookups and content fetching, additionally can be configured to account for static content caching.
-spawns background worker to clean up expired static content to clear up disk space.
+### Flags and environment
+
+| Flag | Env | Description |
+|------|-----|-------------|
+| `-config <path>` | `ADMINBOT_CONFIG_PATH` | Path to the YAML config file (`./config.yaml` by default; flag wins over env) |
+| `-validate <path>` | — | Validate a config file and exit |
+
+## Configuration
 
 ```yaml
-proxy:
-  enabled: true
-  addr: "0.0.0.0"                     # optional, inherits http.addr if undefined.
-  port: 8081                          # optional, inherits http.port if undefined.
-  cache-ttl: "14d"                    # optional, defaults to '7d' if undefined.
-  cache: "/var/cache/admin-bot/admin-bot-proxy" # optional, no centent caching if undefined.
-  targets:
-    github: # Route: /proxy/github/
-      url: "https://github.com"
-      # cache-ttl: "1d"               # Optional override
-```
-
-### Example Setup
-```yaml
-# Main HTTP Server Configuration
+# Main HTTP server configuration
 http:
-  enabled: true
-  addr: "0.0.0.0"
-  port: 8080 # Single port for all HTTP services
+  enabled: true            # default: true
+  addr: "0.0.0.0"          # default: "0.0.0.0"
+  port: 8080               # default: 8080
 
-  # --- Static File Serving ---
-  # Serves local directories via HTTP.
+  # --- Static file serving ---
   static:
     enabled: true
-    # Base path prefix for all static routes: /static/
-    # Map key becomes the next part of the path: /static/<key>/...
     dirs:
-      files-ubuntu: # Route: /static/files-ubuntu/
+      files-ubuntu:                          # route: /static/files-ubuntu/
         path: "/var/www/static-files-ubuntu"
-      files-rhel:   # Route: /static/files-rhel/
+      files-rhel:
         path: "/var/www/static-files-rhel"
-      # Add other static directories as needed
 
-  # Forward Proxy Specific Settings
+  # --- Forward proxy ---
   forward-proxy:
-    # Controls the forward proxy logic on the http listener
-    # allows Proxiying of domains if omited and domains is defined
     enabled: true
-
-    # Caching configuration for specific domains (Applies primarily to HTTP requests)
     cache:
-      enabled: true # Master switch for caching via this proxy
-      cache-dir: "/var/cache/admin-bot/forward-proxy-cache" # Required if cache.enabled=true
-      cache-ttl: "7d" # Default TTL for cached domains
-
-    # List of domain names (exact match, case-insensitive) to cache HTTP requests for.
-    # Requests to other domains will be proxied but not cached.
-    domains:
+      enabled: true
+      cache-dir: "/var/cache/admin-bot/forward-proxy-cache"  # required when cache.enabled
+      cache-ttl: "7d"                                        # supports s/m/h and d/w units
+    domains:             # exact-match, case-insensitive; requests to these are cached
       - "github.com"
       - "pypi.org"
       - "download.docker.com"
 
-# --- Background Proxy Cache Cleanup Service ---
-# This section defines a background task to clean expired files from the proxy cache.
+# --- Background proxy cache cleanup ---
 proxy-cache-cleanup:
-  # Enabled implicitly if http.proxy.enabled=true and http.proxy.cache-dir is set.
-  enabled: true # Could be explicit if needed
-  # How often to scan the cache directory for expired files.
-  interval: "40s" #"1h" # e.g., "1h", "30m", "6h"
-  # Operates on the directory defined in http.proxy.cache-dir,
-  # using the TTL defined globally in http.proxy.cache-ttl.
-  # Note: Handling per-target TTL overrides during cleanup adds complexity.
-  #       A simpler approach is to clean based only on the global TTL or file mod time + global TTL.
+  interval: "1h"           # default: "1h"; must be positive
+```
+
+Defaults apply when keys are omitted. Validation errors are reported together, so a
+bad config shows every problem at once — run `-validate` to check before deploying.
+
+Durations accept Go units (`30s`, `10m`, `1h`) plus day/week shorthand (`7d`, `2w`).
+
+## How caching works
+
+Responses from allow-listed domains are stored on disk (status, headers, and body)
+and served on subsequent requests until the TTL expires, with an `X-Cache-Status`
+header of `HIT`, `MISS`, or `BYPASS` per response. A cleanup worker removes expired
+entries at the configured interval. Only successful (2xx) responses are cached.
+
+## Development
+
+```sh
+make test        # go test ./pkg/... -v
+make lint        # golangci-lint run ./...
+make build       # build into ./bin
+make docker-dev  # hot-reload dev container via air
+```
+
+Project layout:
+
+```
+cmd/                 entrypoint, flags, service lifecycle and reload orchestration
+pkg/config/          config loading, defaults, validation (viper + fsnotify)
+pkg/httpserver/      top-level server wiring CONNECT vs. regular requests
+pkg/staticfiles/     static route registration
+pkg/forwardproxy/    CONNECT tunneling, origin fetches, disk cache
+pkg/cachecleaner/    periodic expired-entry removal
 ```

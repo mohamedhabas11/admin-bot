@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"time"
@@ -39,39 +39,28 @@ func (s *Server) createRootHandler(cfg *config.Config) http.Handler {
 	if cfg.HTTP.Static.Enabled {
 		staticfiles.RegisterStaticRoutes(requestMux, cfg.HTTP.Static) // Register on requestMux
 	} else {
-		log.Println("Static file serving is disabled.")
+		slog.Info("static file serving disabled")
 	}
 
 	// Initialize Proxy Handler if enabled (needed for both CONNECT and HTTP fallback)
 	if cfg.HTTP.ForwardProxy.Enabled {
-		log.Println("Forward proxy is enabled.")
-		specificProxyHandler = forwardproxy.NewHandler(cfg.HTTP.ForwardProxy)
+		slog.Info("forward proxy enabled")
+		specificProxyHandler = forwardproxy.NewHandler(cfg.HTTP.ForwardProxy, cfg.HTTP.Port)
 
 		// Register the proxy's HTTP handler as the fallback for the mux
 		requestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			// This function is called only if no /static/ route matched
-			log.Printf("DBG: Mux fallback: Routing to proxy handler for %s", r.URL.Path)
+			slog.Debug("mux fallback routing to proxy handler", "path", r.URL.Path)
 			specificProxyHandler.HandleHTTP(w, r)
 		})
 
 	} else {
-		log.Println("Forward proxy is disabled.")
-		// Add a default 404 handler to requestMux ONLY if proxy is also disabled
-		// This handles requests that don't match /static/
-		if !cfg.HTTP.Static.Enabled || len(cfg.HTTP.Static.Dirs) == 0 {
-			requestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				log.Printf("No handler configured for path: %s", r.URL.Path)
-				http.NotFound(w, r)
-			})
-		} else {
-			// If static is enabled but proxy is disabled, requests not matching /static/
-			// should also result in 404. ServeMux handles this by default if "/" isn't explicitly handled.
-			// We could add an explicit 404 handler for "/" here too if desired.
-			requestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				log.Printf("Path %s not found (no static match, proxy disabled)", r.URL.Path)
-				http.NotFound(w, r)
-			})
-		}
+		slog.Info("forward proxy disabled")
+		// Requests not matching a static route get the default 404.
+		requestMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			slog.Debug("no handler for path", "path", r.URL.Path)
+			http.NotFound(w, r)
+		})
 	}
 
 	// --- Top-Level Handler ---
@@ -81,7 +70,7 @@ func (s *Server) createRootHandler(cfg *config.Config) http.Handler {
 			if specificProxyHandler != nil {
 				specificProxyHandler.HandleConnect(w, r)
 			} else {
-				log.Printf("ERROR: Proxy enabled but handler is nil for CONNECT %s", r.RequestURI)
+				slog.Error("proxy enabled but handler is nil for CONNECT", "uri", r.RequestURI)
 				http.Error(w, "Proxy configuration error", http.StatusInternalServerError)
 			}
 			return // CONNECT handled
@@ -112,26 +101,26 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	go func() {
-		log.Printf("HTTP server listening on %s", addr)
+		slog.Info("http server listening", "addr", addr)
 		if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("ERROR: ListenAndServe failed: %v", err)
+			slog.Error("listen and serve failed", "err", err)
 		}
 	}()
 
 	<-ctx.Done()
-	log.Println("Shutdown signal received by HTTP server...")
+	slog.Info("shutdown signal received by http server")
 	return s.Stop()
 }
 
 // Stop gracefully stops the HTTP server.
 func (s *Server) Stop() error {
 	if s.server == nil {
-		log.Println("Server Stop() called but server was not running or already stopped.")
+		slog.Info("server stop called but server was not running")
 		return nil
 	}
 
 	serverAddr := s.server.Addr // Capture address before server becomes nil
-	log.Printf("Attempting to stop server on %s gracefully...", serverAddr)
+	slog.Info("stopping server gracefully", "addr", serverAddr)
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -141,6 +130,6 @@ func (s *Server) Stop() error {
 		return fmt.Errorf("server shutdown failed for %s: %w", serverAddr, err)
 	}
 
-	log.Printf("Server on %s stopped gracefully.", serverAddr)
+	slog.Info("server stopped gracefully", "addr", serverAddr)
 	return nil
 }

@@ -3,7 +3,7 @@ package cachecleaner
 import (
 	"context"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -13,11 +13,11 @@ import (
 // It returns a function that can be called to stop the cleaner.
 func StartCleaner(ctx context.Context, interval time.Duration, cacheDir string, cacheTTL time.Duration) (stopFunc func()) {
 	if interval <= 0 || cacheDir == "" || cacheTTL <= 0 {
-		log.Println("Cache cleaner not started: interval or TTL is zero/negative, or cacheDir is empty.")
+		slog.Info("cache cleaner not started: interval or TTL non-positive, or cache dir empty")
 		return func() {} // Return no-op stop function
 	}
 
-	log.Printf("Starting cache cleaner: Interval=%v, Dir=%s, TTL=%v", interval, cacheDir, cacheTTL)
+	slog.Info("cache cleaner started", "interval", interval, "dir", cacheDir, "ttl", cacheTTL)
 	ticker := time.NewTicker(interval)
 	stopChan := make(chan struct{}) // Channel to signal stop
 
@@ -28,19 +28,19 @@ func StartCleaner(ctx context.Context, interval time.Duration, cacheDir string, 
 		for {
 			select {
 			case <-ticker.C:
-				log.Println("Running cache cleanup...")
+				slog.Info("running cache cleanup")
 				deletedCount, err := runCleanup(cacheDir, cacheTTL)
 				if err != nil {
-					log.Printf("ERROR during cache cleanup: %v", err)
+					slog.Error("cache cleanup failed", "err", err)
 				} else {
-					log.Printf("Cache cleanup finished. Deleted %d expired files.", deletedCount)
+					slog.Info("cache cleanup finished", "deleted", deletedCount)
 				}
 			case <-stopChan:
-				log.Println("Stopping cache cleaner ticker.")
+				slog.Info("stopping cache cleaner ticker")
 				ticker.Stop()
 				return
 			case <-ctx.Done(): // Listen for global context cancellation
-				log.Println("Stopping cache cleaner due to context cancellation.")
+				slog.Info("stopping cache cleaner due to context cancellation")
 				ticker.Stop()
 				return
 			}
@@ -64,7 +64,7 @@ func runCleanup(cacheDir string, cacheTTL time.Duration) (int, error) {
 	walkFunc := func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			// Log error accessing path but continue walking if possible
-			log.Printf("Error accessing path %s during cleanup walk: %v", path, err)
+			slog.Warn("cleanup walk cannot access path", "path", path, "err", err)
 			return nil // Continue walking other parts
 		}
 
@@ -81,16 +81,16 @@ func runCleanup(cacheDir string, cacheTTL time.Duration) (int, error) {
 		// Get file info for modification time
 		info, err := d.Info() // Use DirEntry.Info() - more efficient
 		if err != nil {
-			log.Printf("Error getting info for %s: %v", path, err)
+			slog.Warn("cleanup walk cannot stat file", "path", path, "err", err)
 			return nil // Continue
 		}
 
 		// Check if file modification time is before the minimum allowed time
 		if info.ModTime().Before(minModTime) {
-			log.Printf("Deleting expired cache file: %s (ModTime: %s)", path, info.ModTime())
+			slog.Debug("deleting expired cache file", "path", path, "modTime", info.ModTime())
 			err := os.Remove(path)
 			if err != nil {
-				log.Printf("Error deleting file %s: %v", path, err)
+				slog.Warn("failed to delete expired cache file", "path", path, "err", err)
 				// Log error but continue cleanup
 			} else {
 				deletedCount++

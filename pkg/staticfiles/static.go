@@ -2,7 +2,7 @@
 package staticfiles
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"path"
 	"strings"
@@ -18,10 +18,10 @@ const StaticBaseUrlPath = "/static/"
 func loggingMiddleware(h http.Handler, routePrefix string) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		log.Printf("STATIC REQ: [%s] %s %s (Route: %s)", r.Method, r.URL.Path, r.RemoteAddr, routePrefix)
+		slog.Debug("static request", "method", r.Method, "path", r.URL.Path, "remote", r.RemoteAddr, "route", routePrefix)
 		// Consider using a ResponseWriter wrapper to capture status code later
 		h.ServeHTTP(w, r) // Call the original handler (StripPrefix -> FileServer)
-		log.Printf("STATIC RSP: [%s] %s completed in %v", r.Method, r.URL.Path, time.Since(start))
+		slog.Debug("static request complete", "method", r.Method, "path", r.URL.Path, "duration", time.Since(start))
 	})
 }
 
@@ -31,20 +31,20 @@ func RegisterStaticRoutes(mux *http.ServeMux, cfg config.StaticConfig) {
 		return
 	}
 
-	log.Println("Registering static file routes...")
+	slog.Info("registering static file routes")
 	if len(cfg.Dirs) == 0 {
-		log.Println("  No static directories configured.")
+		slog.Info("no static directories configured")
 		return
 	}
 
 	for key, dirCfg := range cfg.Dirs {
 		routeKey := strings.Trim(key, "/")
 		if routeKey == "" {
-			log.Printf("  Skipping static route: Invalid key.")
+			slog.Warn("skipping static route: invalid route key")
 			continue
 		}
 		if dirCfg.Path == "" {
-			log.Printf("  Skipping static route '/static/%s/': Filesystem path is empty.", routeKey)
+			slog.Warn("skipping static route: filesystem path empty", "route", "/static/"+routeKey+"/")
 			continue
 		}
 
@@ -58,6 +58,6 @@ func RegisterStaticRoutes(mux *http.ServeMux, cfg config.StaticConfig) {
 
 		mux.Handle(urlPathPrefix, loggedHandler) // Register the logged handler
 
-		log.Printf("  Route '%s' -> Serves files from '%s'", urlPathPrefix, dirCfg.Path)
+		slog.Info("static route registered", "route", urlPathPrefix, "dir", dirCfg.Path)
 	}
 }

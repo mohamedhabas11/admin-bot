@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/gob"
+	"errors"
 	"fmt"
 	"io"
-	"log"
-	"mime"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,16 @@ import (
 // FetchFunc defines the function signature for fetching the resource when cache misses.
 type FetchFunc func(r *http.Request) (resp *http.Response, bodyBytes []byte, err error)
 
+// cacheEntry is the gob-encoded on-disk representation of a cached HTTP response.
+// Storing status code and headers alongside the body lets cached responses be
+// served with their original content type instead of a guessed fallback.
+type cacheEntry struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+	StoredAt   time.Time
+}
+
 // CacheHandler implements caching logic for the forward proxy.
 type CacheHandler struct {
 	cacheDir    string
@@ -28,25 +39,22 @@ type CacheHandler struct {
 }
 
 // NewCacheHandler creates a new caching layer.
-func NewCacheHandler(cacheDir string, cacheTTL time.Duration, fetcher FetchFunc) *CacheHandler {
-	if cacheDir == "" {
-		log.Println("WARN: Cache directory is empty, caching will be disabled.")
-		// Return nil or a handler that always fetches? For now, allow but log.
-		// Or return error: return nil, errors.New("cache directory cannot be empty")
-	}
+// A negative cacheTTL is treated as zero, which disables serving from cache.
+func NewCacheHandler(cacheDir string, cacheTTL time.Duration, fetcher FetchFunc) (*CacheHandler, error) {
 	if fetcher == nil {
-		log.Fatal("Fetcher function cannot be nil for CacheHandler") // Or return error
+		return nil, errors.New("fetcher function cannot be nil")
 	}
-	// Ensure cache TTL is non-negative.
+	if cacheDir == "" {
+		return nil, errors.New("cache directory cannot be empty")
+	}
 	if cacheTTL < 0 {
-		log.Println("WARN: Negative cache TTL provided, setting to 0 (disabled).")
-		cacheTTL = 0 // Effectively disable caching if TTL is negative
+		cacheTTL = 0
 	}
 	return &CacheHandler{
 		cacheDir:    cacheDir,
 		cacheTTL:    cacheTTL,
 		fetchOrigin: fetcher,
-	}
+	}, nil
 }
 
 // ServeFromCacheOrFetch tries to serve from cache, otherwise calls the fetcher.
@@ -54,26 +62,22 @@ func NewCacheHandler(cacheDir string, cacheTTL time.Duration, fetcher FetchFunc)
 func (h *CacheHandler) ServeFromCacheOrFetch(r *http.Request) (*http.Response, []byte, bool, error) {
 	// Check if caching is effectively disabled
 	if h.cacheTTL <= 0 || h.cacheDir == "" {
-		// log.Printf("DBG: Cache Check: Caching disabled (TTL=%s, Dir='%s')", h.cacheTTL, h.cacheDir) // Optional Debug
 		resp, body, err := h.fetchOrigin(r)
 		return resp, body, false, err
 	}
 
 	cacheKey := generateCacheKey(r.Method, r.URL)
 	cachePath := filepath.Join(h.cacheDir, cacheKey)
-	// log.Printf("DBG: Cache Check: URL=%s, Key=%s, Path=%s", r.URL.String(), cacheKey, cachePath) // Optional Debug
 
 	// Try to serve from cache first
 	resp, body, found, err := h.serveFromCacheFile(cachePath)
 	if err != nil {
 		// Log error reading cache but proceed to fetch
-		log.Printf("WARN: Error reading cache file %s: %v. Attempting fetch.", cachePath, err)
+		slog.Warn("error reading cache file; fetching origin", "path", cachePath, "err", err)
 	}
 	if found {
-		// log.Printf("DBG: Cache Check: Found in cache file %s", cachePath) // Optional Debug
 		return resp, body, true, nil // Cache Hit!
 	}
-	// log.Printf("DBG: Cache Check: Not found or expired in cache file %s", cachePath) // Optional Debug
 
 	// Cache Miss: Fetch from origin
 	originResp, originBody, fetchErr := h.fetchOrigin(r)
@@ -85,13 +89,13 @@ func (h *CacheHandler) ServeFromCacheOrFetch(r *http.Request) (*http.Response, [
 
 	// Cache successful responses (e.g., 2xx)
 	if originResp.StatusCode >= 200 && originResp.StatusCode < 300 {
-		// Save response headers and body to cache
-		// For simplicity now, just cache the body. A better cache would store headers too.
-		h.saveToCache(cachePath, originBody) // Save the fetched body
+		// Save status code, headers, and body so the cached response can be
+		// reconstructed faithfully on a hit.
+		h.saveToCache(cachePath, originResp, originBody)
 		// Since we cached, the original body is no longer needed by the caller in this path
 		originResp.Body.Close()
 	} else {
-		log.Printf("Not caching response for %s due to status code: %d", r.URL.String(), originResp.StatusCode)
+		slog.Info("response not cached due to status code", "url", r.URL.String(), "status", originResp.StatusCode)
 		// IMPORTANT: Do not close originResp.Body here, the caller (HandleHTTP) needs it.
 	}
 
@@ -99,80 +103,107 @@ func (h *CacheHandler) ServeFromCacheOrFetch(r *http.Request) (*http.Response, [
 	return originResp, originBody, false, nil
 }
 
-// serveFromCacheFile tries to read response body from a cache file.
-// Returns dummy response, body bytes, bool found, error.
-// A real implementation would store/retrieve headers as well.
+// serveFromCacheFile tries to read a cached response from disk.
+// Returns the reconstructed response, body bytes, bool found, error.
 func (h *CacheHandler) serveFromCacheFile(path string) (*http.Response, []byte, bool, error) {
 	fi, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// log.Printf("DBG: serveFromCacheFile: File not found: %s", path) // Optional Debug
 			return nil, nil, false, nil // Not found, not an error
 		}
-		log.Printf("WARN: serveFromCacheFile: Stat error for %s: %v", path, err) // Log as warning
-		return nil, nil, false, err                                              // Other stat error
+		slog.Warn("cache stat failed", "path", path, "err", err)
+		return nil, nil, false, err // Other stat error
 	}
 
 	// Check TTL
 	if time.Since(fi.ModTime()) > h.cacheTTL {
-		log.Printf("Cache EXPIRED for %s (ModTime: %s, TTL: %s)", path, fi.ModTime(), h.cacheTTL)
+		slog.Debug("cache entry expired", "path", path, "ttl", h.cacheTTL)
 		// Attempt removal (best effort)
 		if rmErr := os.Remove(path); rmErr != nil && !os.IsNotExist(rmErr) {
-			log.Printf("WARN: Failed to remove expired cache file %s: %v", path, rmErr)
+			slog.Warn("failed to remove expired cache file", "path", path, "err", rmErr)
 		}
 		return nil, nil, false, nil // Expired, treat as not found
 	}
-	// log.Printf("DBG: serveFromCacheFile: Cache valid for %s", path) // Optional Debug
 
-	// Read the file content (body)
-	bodyBytes, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		// Log error but treat as cache miss
-		log.Printf("WARN: Failed to read cache file %s: %v", path, err)
-		// Attempt to remove potentially corrupt file
+		slog.Warn("failed to read cache file; treating as miss", "path", path, "err", err)
 		_ = os.Remove(path)
 		return nil, nil, false, nil // Treat as miss if read fails
 	}
 
-	// --- Construct a dummy response ---
-	// Ideally, we'd load saved headers here. For now, create minimal headers.
+	var entry cacheEntry
+	if err := gob.NewDecoder(bytes.NewReader(raw)).Decode(&entry); err != nil {
+		// Unreadable entry (e.g., leftover from an older cache format): treat as miss.
+		slog.Warn("failed to decode cache file; discarding", "path", path, "err", err)
+		_ = os.Remove(path)
+		return nil, nil, false, nil
+	}
+
+	bodyBytes := entry.Body
 	resp := &http.Response{
-		StatusCode: http.StatusOK, // Assume OK for cached item
-		Header:     make(http.Header),
-		Body:       io.NopCloser(bytes.NewReader(bodyBytes)), // Create a readable body
+		StatusCode: entry.StatusCode,
+		Header:     entry.Header.Clone(),
+		Body:       io.NopCloser(bytes.NewReader(bodyBytes)),
+	}
+	if resp.Header == nil {
+		resp.Header = make(http.Header)
 	}
 	resp.Header.Set("Content-Length", strconv.Itoa(len(bodyBytes)))
-	resp.Header.Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
-	// Set Content-Type based on extension (of the original URL if stored, or cache key?)
-	// This is limited without stored headers.
-	ctype := mime.TypeByExtension(filepath.Ext(path)) // Guess from cache key extension (limited)
-	if ctype == "" {
-		ctype = "application/octet-stream"
-	}
-	resp.Header.Set("Content-Type", ctype)
 
 	return resp, bodyBytes, true, nil
 }
 
-// saveToCache saves the response body to the cache file.
-func (h *CacheHandler) saveToCache(path string, data []byte) {
+// saveToCache atomically persists a response's status code, headers, and body.
+// It writes to a temporary file in the same directory and renames it into place,
+// so readers never observe a partially written entry.
+func (h *CacheHandler) saveToCache(path string, resp *http.Response, data []byte) {
 	dir := filepath.Dir(path)
 	// Ensure cache directory exists
 	if err := os.MkdirAll(dir, 0750); err != nil {
-		log.Printf("ERROR: Failed to create cache directory %s: %v", dir, err)
+		slog.Error("failed to create cache directory", "dir", dir, "err", err)
 		return
 	}
 
-	// Write the file
-	// Use a temporary file and rename for atomicity? More robust but complex.
-	// For now, direct write.
-	if err := os.WriteFile(path, data, 0640); err != nil {
-		log.Printf("ERROR: Failed to write cache file %s: %v", path, err)
-		// Attempt to remove potentially corrupt file
-		_ = os.Remove(path)
+	entry := cacheEntry{
+		StatusCode: resp.StatusCode,
+		Header:     resp.Header.Clone(),
+		Body:       data,
+		StoredAt:   time.Now().UTC(),
+	}
+
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(entry); err != nil {
+		slog.Error("failed to encode cache entry", "path", path, "err", err)
 		return
 	}
-	log.Printf("Cache SAVED %d bytes to %s", len(data), path)
+
+	tmp, err := os.CreateTemp(dir, ".tmp-cache-*")
+	if err != nil {
+		slog.Error("failed to create temp cache file", "dir", dir, "err", err)
+		return
+	}
+	tmpPath := tmp.Name()
+
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		slog.Error("failed to write cache file", "path", tmpPath, "err", err)
+		return
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		slog.Error("failed to close cache file", "path", tmpPath, "err", err)
+		return
+	}
+
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		slog.Error("failed to finalize cache file", "path", path, "err", err)
+		return
+	}
+	slog.Debug("cache entry saved", "status", entry.StatusCode, "bytes", len(data), "path", path)
 }
 
 // generateCacheKey creates a filesystem-safe cache key from method and URL.

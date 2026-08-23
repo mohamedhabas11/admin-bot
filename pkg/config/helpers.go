@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -12,7 +11,7 @@ import (
 // --- Helper Methods ---
 
 // GetCacheTTL parses the proxy's cache TTL string.
-func (c *CacheCfg) GetCacheTTL() (time.Duration, error) {
+func (c *CacheConfig) GetCacheTTL() (time.Duration, error) {
 	ttlStr := c.CacheTTL // Use correct field name CacheTTL
 	if ttlStr == "" {
 		ttlStr = "7d" // Default if not set
@@ -25,11 +24,11 @@ func (c *CacheCfg) GetCacheTTL() (time.Duration, error) {
 }
 
 // GetCacheDir returns the cache directory.
-func (c *CacheCfg) GetCacheDir() string {
+func (c *CacheConfig) GetCacheDir() string {
 	return c.CacheDir
 }
 
-// GetInterval parses the cleanup interval string.
+// GetInterval parses the cleanup interval string and requires a positive duration.
 func (c *CacheCleanupConfig) GetInterval() (time.Duration, error) {
 	intervalStr := c.Interval
 	if intervalStr == "" {
@@ -39,10 +38,8 @@ func (c *CacheCleanupConfig) GetInterval() (time.Duration, error) {
 	if err != nil {
 		return 0, fmt.Errorf("invalid proxy-cache-cleanup interval '%s': %w", intervalStr, err)
 	}
-	if d <= 0 { // Ensure interval is positive
-		// Return default and log warning instead of error?
-		log.Printf("WARN: proxy-cache-cleanup interval '%s' is not positive, using default 1h", intervalStr)
-		return time.Hour, nil
+	if d <= 0 {
+		return 0, fmt.Errorf("proxy-cache-cleanup interval must be positive, got '%s'", intervalStr)
 	}
 	return d, nil
 }
@@ -51,7 +48,6 @@ func (c *CacheCleanupConfig) GetInterval() (time.Duration, error) {
 // Performs case-insensitive comparison.
 func (p *ProxyConfig) ShouldCacheDomain(host string) bool {
 	if !p.Cache.Enabled || p.Cache.CacheDir == "" {
-		// log.Printf("DBG: ShouldCacheDomain(%s): Cache disabled globally or no cache dir.", host) // Optional Debug
 		return false
 	}
 	// Remove port if present (e.g., "example.com:80")
@@ -60,13 +56,10 @@ func (p *ProxyConfig) ShouldCacheDomain(host string) bool {
 
 	for _, domain := range p.Domains {
 		domainLower := strings.ToLower(domain)
-		// log.Printf("DBG: ShouldCacheDomain(%s): Checking against configured domain '%s'", hostLower, domainLower) // Optional Debug
 		if domainLower == hostLower {
-			// log.Printf("DBG: ShouldCacheDomain(%s): MATCH FOUND.", host) // Optional Debug
 			return true
 		}
 	}
-	// log.Printf("DBG: ShouldCacheDomain(%s): No match found in configured domains.", host) // Optional Debug
 	return false
 }
 

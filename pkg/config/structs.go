@@ -28,13 +28,13 @@ type StaticDirConfig struct {
 
 // ProxyConfig holds settings for the forward proxy functionality.
 type ProxyConfig struct {
-	Enabled bool     `mapstructure:"enabled"`
-	Cache   CacheCfg `mapstructure:"cache"`
-	Domains []string `mapstructure:"domains"` // Domains to cache (exact match)
+	Enabled bool        `mapstructure:"enabled"`
+	Cache   CacheConfig `mapstructure:"cache"`
+	Domains []string    `mapstructure:"domains"` // Domains to cache (exact match)
 }
 
-// CacheCfg holds caching specific settings for the proxy.
-type CacheCfg struct {
+// CacheConfig holds caching specific settings for the proxy.
+type CacheConfig struct {
 	Enabled  bool   `mapstructure:"enabled"`
 	CacheDir string `mapstructure:"cache-dir"`
 	CacheTTL string `mapstructure:"cache-ttl"` // Keep as string from YAML
